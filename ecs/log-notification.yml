@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create ECS and ALB
+
+Parameters:
+  VpcId:
+    Description: VPC ID that can be used to the ECS cluster and the ALB
+    Type: AWS::EC2::VPC::Id
+    ConstraintDescription: must be a valid VPC
+  ALBPort:
+    Description: Port number for ALBListener
+    Type: Number
+    Default: 80
+  ALBSecurityGroupId:
+    Description: SecurityGroup ID that can be used to the ALB
+    Type: AWS::EC2::SecurityGroup::Id
+    ConstraintDescription: must be a valid Security Group
+  ALBSubnetIds:
+    Description: Subnet ID that can be used to the ALB
+    Type: List<AWS::EC2::Subnet::Id>
+    ConstraintDescription: must be a valid Security Group and at least two Subnets must be specified
+  CloudWatchLogGroupMultiLinePattern:
+    Description: Multi-line start pattern using a regular expression for the CloudWatch Logs
+    Type: String
+  ECSImageName:
+    Description: Image name that can be used to the ECSTaskDefinition
+    Type: String
+  ECSContainerPort:
+    Description: Port number for ECSContainer
+    Type: Number
+    Default: 80
+  ECSTaskCPUUnit:
+    Description: Hard limit of CPU units to present for the ECSTaskDefinition
+    Type: String
+    Default: '1024'
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
+      - '8192'
+      - '16384'
+  ECSTaskMemory:
+    Description: Hard limit of memory to present for the ECSTaskDefinition
+    Type: String
+    Default: '3072'
+  ECSTaskCpuArchitecture:
+    Description: CPU architecture for the ECSTaskDefinition
+    Type: String
+    Default: 'X86_64'
+    AllowedValues:
+      - 'X86_64'
+      - 'ARM64'
+  ECSTaskOperatingSystemFamily:
+    Description: Operating system family for the ECSTaskDefinition
+    Type: String
+    Default: 'LINUX'
+    AllowedValues:
+      - 'LINUX'
+      - 'WINDOWS_SERVER_2019_FULL'
+      - 'WINDOWS_SERVER_2019_CORE'
+      - 'WINDOWS_SERVER_2022_FULL'
+      - 'WINDOWS_SERVER_2022_CORE'
+  ECSServiceDesiredCount:
+    Description: Number of instantiations of the specified task definition
+    Type: Number
+  ECSServiceSecurityGroupId:
+    Description: SecurityGroup ID that can be used to the ECSService
+    Type: AWS::EC2::SecurityGroup::Id
+    ConstraintDescription: must be a valid Security Group
+  ECSServiceSubnetId:
+    Description: Subnet ID that can be used to the ECSService
+    Type: AWS::EC2::Subnet::Id
+    ConstraintDescription: must be a valid Subnet
+
+Conditions:
+  UseMultiLinePattern: !Not [!Equals [!Ref CloudWatchLogGroupMultiLinePattern, '']]
+
+Resources:
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      SecurityGroups: 
+        - !Ref ALBSecurityGroupId
+      Subnets: !Ref ALBSubnetIds
+      Type: application
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: "/"
+      Name: !Sub '${AWS::StackName}-alb-target'
+      Port: !Ref ECSContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ALB
+      Port: !Ref ALBPort
+      Protocol: HTTP
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${AWS::StackName}-logs'
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::Region}-${AWS::StackName}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - ecs-tasks.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+  ECSTaskDefinition: 
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      ContainerDefinitions:
+        - Essential: true
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECSImageName}:latest'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub '${AWS::StackName}-logs'
+              awslogs-multiline-pattern: !If [UseMultiLinePattern, !Ref CloudWatchLogGroupMultiLinePattern, !Ref "AWS::NoValue"]
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Name: !Sub '${AWS::StackName}-container'
+          PortMappings:
+            - ContainerPort: !Ref ECSContainerPort
+              Protocol: tcp
+      Cpu: !Ref ECSTaskCPUUnit
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      Family: !Sub '${AWS::StackName}-task-family'
+      Memory: !Ref ECSTaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: !Ref ECSTaskCpuArchitecture
+        OperatingSystemFamily: !Ref ECSTaskOperatingSystemFamily
+  ECSService:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}-service'
+      Cluster: !Ref ECSCluster
+      DesiredCount: !Ref ECSServiceDesiredCount
+      LaunchType: FARGATE
+      LoadBalancers:
+        - TargetGroupArn: !Ref ALBTargetGroup
+          ContainerPort: !Ref ECSContainerPort
+          ContainerName: !Sub '${AWS::StackName}-container'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ECSServiceSecurityGroupId
+          Subnets:
+            - !Ref ECSServiceSubnetId
+      TaskDefinition: !Ref ECSTaskDefinition
+    DependsOn: ALBListener
