@@ -1,4 +1,4 @@
-# log-notification-cloud-formation-private
+# log-notification-cloud-formation
 ログ出力設定のCfn化
 
 # 各テンプレートの説明
